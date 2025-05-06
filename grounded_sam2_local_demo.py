@@ -11,11 +11,16 @@ from sam2.build_sam import build_sam2
 from sam2.sam2_image_predictor import SAM2ImagePredictor
 from grounding_dino.groundingdino.util.inference import load_model, load_image, predict
 
+
+
 """
 Hyper parameters
 """
 TEXT_PROMPT = "car. tire."
+TEXT_PROMPT = "object. person."
 IMG_PATH = "notebooks/images/truck.jpg"
+IMG_PATH = "notebooks/images/00052025.jpg"
+IMG_PATH = '/mnt/d/Projects/data/gazefollow/train/00000080/00080697.jpg'
 SAM2_CHECKPOINT = "./checkpoints/sam2.1_hiera_large.pt"
 SAM2_MODEL_CONFIG = "configs/sam2.1/sam2.1_hiera_l.yaml"
 GROUNDING_DINO_CONFIG = "grounding_dino/groundingdino/config/GroundingDINO_SwinT_OGC.py"
@@ -24,6 +29,8 @@ BOX_THRESHOLD = 0.35
 TEXT_THRESHOLD = 0.25
 DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
 OUTPUT_DIR = Path("outputs/grounded_sam2_local_demo")
+# convert to absolute path
+OUTPUT_DIR = OUTPUT_DIR.resolve()
 DUMP_JSON_RESULTS = True
 
 # create output directory
@@ -31,7 +38,16 @@ OUTPUT_DIR.mkdir(parents=True, exist_ok=True)
 
 # environment settings
 # use bfloat16
-
+#%% use specific person points
+points_path = r"D:\Projects\LLaVA-NeXT\llava_attention_maps\00080697_attn_sweep\20250430_170329_Lets_count_one_by_one_the_peop\layer_23\each_person_attn_maps\person_0\person_0_attn_map_smooth_centers.pt"
+points_path = r"D:\Projects\LLaVA-NeXT\llava_attention_maps\00080697_attn_sweep\20250430_170329_Lets_count_one_by_one_the_peop\layer_23\each_person_attn_maps\person_1\person_1_attn_map_smooth_centers.pt"
+points_path = r"D:\Projects\LLaVA-NeXT\llava_attention_maps\00080697_attn_sweep\20250502_145759_You_are_an_expert_vision_assis\layer_23\each_person_attn_maps\person_2\gaze_target_2_attn_map_smooth_centers.pt"
+points_path = r"D:\Projects\LLaVA-NeXT\llava_attention_maps\00080697_attn_sweep\20250502_145759_You_are_an_expert_vision_assis\layer_23\each_person_attn_maps\person_1\gaze_target_1_attn_map_smooth_centers.pt"
+points_path = windows_to_wsl_path(points_path)
+points_arr = torch.load(points_path, weights_only=False)
+point_coords = points_arr['centers']
+point_labels = np.ones(len(point_coords))
+#%%
 # build SAM2 image predictor
 sam2_checkpoint = SAM2_CHECKPOINT
 model_cfg = SAM2_MODEL_CONFIG
@@ -44,7 +60,7 @@ grounding_model = load_model(
     model_checkpoint_path=GROUNDING_DINO_CHECKPOINT,
     device=DEVICE
 )
-
+boxes = None
 
 # setup the input image and text prompt for SAM 2 and Grounding DINO
 # VERY important: text queries need to be lowercased + end with a dot
@@ -55,22 +71,27 @@ image_source, image = load_image(img_path)
 
 sam2_predictor.set_image(image_source)
 
-boxes, confidences, labels = predict(
-    model=grounding_model,
-    image=image,
-    caption=text,
-    box_threshold=BOX_THRESHOLD,
-    text_threshold=TEXT_THRESHOLD,
-)
+gaze_target_coords = np.array([[388, 159]])
+gaze_labels = np.array([1])
+
+if boxes is None:
+    # skip the bbox prediction if already run
+    boxes, confidences, labels = predict(
+        model=grounding_model,
+        image=image,
+        caption=text,
+        box_threshold=BOX_THRESHOLD,
+        text_threshold=TEXT_THRESHOLD,
+    )
 
 # process the box prompt for SAM 2
 h, w, _ = image_source.shape
 boxes = boxes * torch.Tensor([w, h, w, h])
 input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
-
-
-# FIXME: figure how does this influence the G-DINO model
-torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
+#
+#
+# # FIXME: figure how does this influence the G-DINO model
+# torch.autocast(device_type="cuda", dtype=torch.bfloat16).__enter__()
 
 if torch.cuda.get_device_properties(0).major >= 8:
     # turn on tfloat32 for Ampere GPUs (https://pytorch.org/docs/stable/notes/cuda.html#tensorfloat-32-tf32-on-ampere-devices)
@@ -78,9 +99,9 @@ if torch.cuda.get_device_properties(0).major >= 8:
     torch.backends.cudnn.allow_tf32 = True
 
 masks, scores, logits = sam2_predictor.predict(
-    point_coords=None,
-    point_labels=None,
-    box=input_boxes,
+    point_coords=point_coords,
+    point_labels=point_labels,
+    box=None,
     multimask_output=False,
 )
 
@@ -91,8 +112,8 @@ Post-process the output of the model to get the masks, scores, and logits for vi
 if masks.ndim == 4:
     masks = masks.squeeze(1)
 
-
-confidences = confidences.numpy().tolist()
+if not isinstance(confidences, list):
+    confidences = confidences.numpy().tolist()
 class_names = labels
 
 class_ids = np.array(list(range(len(class_names))))
@@ -106,6 +127,8 @@ labels = [
 """
 Visualize image with supervision useful API
 """
+input_boxes = np.array([input_boxes[2:,]]).reshape(-1, 4)
+class_ids = np.array([class_ids[1]]).reshape(-1)
 img = cv2.imread(img_path)
 detections = sv.Detections(
     xyxy=input_boxes,  # (n, 4)
@@ -117,13 +140,13 @@ box_annotator = sv.BoxAnnotator()
 annotated_frame = box_annotator.annotate(scene=img.copy(), detections=detections)
 
 label_annotator = sv.LabelAnnotator()
-annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=detections, labels=labels)
+annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=detections, labels=['labels'])
 cv2.imwrite(os.path.join(OUTPUT_DIR, "groundingdino_annotated_image.jpg"), annotated_frame)
 
 mask_annotator = sv.MaskAnnotator()
 annotated_frame = mask_annotator.annotate(scene=annotated_frame, detections=detections)
 cv2.imwrite(os.path.join(OUTPUT_DIR, "grounded_sam2_annotated_image_with_mask.jpg"), annotated_frame)
-
+print(f"Saved image to {os.path.join(OUTPUT_DIR, 'grounded_sam2_annotated_image_with_mask.jpg')}")
 """
 Dump the results in standard format and save as json files
 """
