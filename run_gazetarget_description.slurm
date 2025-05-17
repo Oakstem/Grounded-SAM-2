@@ -1,6 +1,6 @@
 #!/bin/bash
 export PYTHONPATH=/home/ai_center/ai_users/alonmardi/projects/Grounded-SAM-2:$PYTHONPATH
-PYTHON_EXEC="/home/ai_center/ai_users/alonmardi/miniconda/envs/llava/bin/python"
+PYTHON_EXEC="/home/ai_center/ai_users/alonmardi/miniconda/envs/gd_sam/bin/python"
 
 #SBATCH --job-name=gaze_extraction
 #SBATCH --output=gaze_extraction_%j.out
