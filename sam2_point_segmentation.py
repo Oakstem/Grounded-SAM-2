@@ -36,6 +36,281 @@ def load_points_from_file(file_path):
         raise ValueError(f"Unsupported file format for points: {file_path}")
 
 
+def visualize_all_masks(
+    image,
+    image_path,
+    point_coords,
+    point_masks,
+    point_scores,
+    text_masks=None,
+    text_scores=None,
+    output_dir="outputs",
+    prefix="sam2"
+):
+    """
+    Visualize all masks with their scores on the image.
+    
+    Args:
+        image: Original image
+        image_path: Path to the original image (for filename generation)
+        point_coords: Point coordinates used for segmentation
+        point_masks: Masks generated from point-based segmentation
+        point_scores: Confidence scores for point-based masks
+        text_masks: Masks generated from text-based segmentation
+        text_scores: Confidence scores for text-based masks
+        output_dir: Directory to save the visualization
+        prefix: Prefix for output filename
+        
+    Returns:
+        Path to the saved visualization
+    """
+    # Create a copy of the original image for visualization
+    all_masks_frame = image.copy()
+    
+    # Create a separate copy for text-based masks if needed
+    if text_masks is not None and len(text_masks) > 0:
+        # Create a multi-panel visualization
+        h, w, c = image.shape
+        # Create a side-by-side two-panel image
+        combined_frame = np.zeros((h, w * 2, c), dtype=np.uint8)
+        
+        # Point masks on the left panel
+        point_frame = image.copy()
+        
+        # Text masks on the right panel
+        text_frame = image.copy()
+        
+        # Process point masks
+        if point_masks is not None and len(point_masks) > 0:
+            point_boxes = get_bbs(point_masks)
+            point_mask_detections = sv.Detections(
+                xyxy=point_boxes,
+                mask=point_masks.astype(bool),
+                confidence=point_scores
+            )
+            
+            # Create labels with scores
+            point_labels = [f"Point: {score:.2f}" for score in point_scores]
+            
+            # Annotate masks
+            point_mask_annotator = sv.MaskAnnotator(
+                color=sv.Color.RED, 
+                color_lookup=sv.ColorLookup.INDEX,
+                opacity=0.3
+            )
+            point_frame = point_mask_annotator.annotate(
+                scene=point_frame, 
+                detections=point_mask_detections
+            )
+            
+            # Annotate boxes with labels
+            point_box_annotator = sv.BoxAnnotator(
+                color=sv.Color.RED,
+                color_lookup=sv.ColorLookup.INDEX,
+                thickness=2
+            )
+            point_frame = point_box_annotator.annotate(
+                scene=point_frame, 
+                detections=point_mask_detections
+            )
+            
+            # Add labels
+            label_annotator = sv.LabelAnnotator(
+                text_thickness=2,
+                text_scale=0.5,
+                color_lookup=sv.ColorLookup.INDEX,
+                text_position=sv.Position.TOP_CENTER
+            )
+            point_frame = label_annotator.annotate(
+                scene=point_frame,
+                detections=point_mask_detections,
+                labels=point_labels
+            )
+            
+            # Add point visualization
+            for x, y in point_coords:
+                cv2.circle(point_frame, (int(x), int(y)), 5, (0, 0, 255), -1)
+        
+        # Process text masks
+        if text_masks is not None and len(text_masks) > 0:
+            text_boxes = get_bbs(text_masks)
+            text_mask_detections = sv.Detections(
+                xyxy=text_boxes,
+                mask=text_masks.astype(bool),
+                confidence=text_scores if isinstance(text_scores, np.ndarray) else np.array(text_scores)
+            )
+            
+            # Create labels with scores
+            text_labels = [f"Text: {score:.2f}" for score in text_scores]
+            
+            # Annotate masks
+            text_mask_annotator = sv.MaskAnnotator(
+                color=sv.Color.BLUE, 
+                color_lookup=sv.ColorLookup.INDEX,
+                opacity=0.3
+            )
+            text_frame = text_mask_annotator.annotate(
+                scene=text_frame, 
+                detections=text_mask_detections
+            )
+            
+            # Annotate boxes with labels
+            text_box_annotator = sv.BoxAnnotator(
+                color=sv.Color.BLUE,
+                color_lookup=sv.ColorLookup.INDEX,
+                thickness=2
+            )
+            text_frame = text_box_annotator.annotate(
+                scene=text_frame, 
+                detections=text_mask_detections
+            )
+            
+            # Add labels
+            text_label_annotator = sv.LabelAnnotator(
+                text_thickness=2,
+                text_scale=0.5,
+                color=sv.Color.BLUE,
+                color_lookup=sv.ColorLookup.INDEX,
+                text_position=sv.Position.TOP_CENTER
+            )
+            text_frame = text_label_annotator.annotate(
+                scene=text_frame,
+                detections=text_mask_detections,
+                labels=text_labels
+            )
+            
+            # Add point visualization
+            for x, y in point_coords:
+                cv2.circle(text_frame, (int(x), int(y)), 5, (0, 0, 255), -1)
+        
+        # Combine the panels
+        combined_frame[:, :w, :] = point_frame
+        combined_frame[:, w:, :] = text_frame
+        
+        # Add titles to the panels
+        cv2.putText(combined_frame, "Point Masks", (w//2 - 100, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        cv2.putText(combined_frame, "Text Masks", (w + w//2 - 100, 30), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 1, (255, 255, 255), 2)
+        
+        # Save the combined visualization
+        output_dir = Path(output_dir)
+        combined_output_path = output_dir / get_filename_with_prefix(image_path, f"{prefix}_all_masks_split")
+        cv2.imwrite(str(combined_output_path), combined_frame)
+        print(f"Saved split masks visualization to {combined_output_path}")
+        
+        # Also create the original combined view but with better label placement
+        all_masks_frame = image.copy()
+    
+    # Create combined view (both mask types on one image)
+    # Visualize point masks with scores
+    if point_masks is not None and len(point_masks) > 0:
+        point_boxes = get_bbs(point_masks)
+        point_mask_detections = sv.Detections(
+            xyxy=point_boxes,
+            mask=point_masks.astype(bool),
+            confidence=point_scores
+        )
+        
+        # Create labels with scores
+        point_labels = [f"Point: {score:.2f}" for score in point_scores]
+        
+        # Annotate masks
+        point_mask_annotator = sv.MaskAnnotator(
+            color=sv.Color.RED, 
+            color_lookup=sv.ColorLookup.INDEX,
+            opacity=0.3
+        )
+        all_masks_frame = point_mask_annotator.annotate(
+            scene=all_masks_frame, 
+            detections=point_mask_detections
+        )
+        
+        # Annotate boxes with labels
+        point_box_annotator = sv.BoxAnnotator(
+            color=sv.Color.RED,
+            color_lookup=sv.ColorLookup.INDEX,
+            thickness=2
+        )
+        all_masks_frame = point_box_annotator.annotate(
+            scene=all_masks_frame, 
+            detections=point_mask_detections
+        )
+        
+        # Add labels at the top
+        label_annotator = sv.LabelAnnotator(
+            text_thickness=2,
+            text_scale=0.5,
+            color_lookup=sv.ColorLookup.INDEX,
+            text_position=sv.Position.TOP_CENTER
+        )
+        all_masks_frame = label_annotator.annotate(
+            scene=all_masks_frame,
+            detections=point_mask_detections,
+            labels=point_labels
+        )
+    
+    # Visualize text masks with scores
+    if text_masks is not None and len(text_masks) > 0:
+        text_boxes = get_bbs(text_masks)
+        text_mask_detections = sv.Detections(
+            xyxy=text_boxes,
+            mask=text_masks.astype(bool),
+            confidence=text_scores if isinstance(text_scores, np.ndarray) else np.array(text_scores)
+        )
+        
+        # Create labels with scores
+        text_labels = [f"Text: {score:.2f}" for score in text_scores]
+        
+        # Annotate masks
+        text_mask_annotator = sv.MaskAnnotator(
+            color=sv.Color.BLUE, 
+            color_lookup=sv.ColorLookup.INDEX,
+            opacity=0.3
+        )
+        all_masks_frame = text_mask_annotator.annotate(
+            scene=all_masks_frame, 
+            detections=text_mask_detections
+        )
+        
+        # Annotate boxes with labels
+        text_box_annotator = sv.BoxAnnotator(
+            color=sv.Color.BLUE,
+            color_lookup=sv.ColorLookup.INDEX,
+            thickness=2
+        )
+        all_masks_frame = text_box_annotator.annotate(
+            scene=all_masks_frame, 
+            detections=text_mask_detections
+        )
+        
+        # Add labels at the bottom
+        text_label_annotator = sv.LabelAnnotator(
+            text_thickness=2,
+            text_scale=0.5,
+            color=sv.Color.BLUE,
+            color_lookup=sv.ColorLookup.INDEX,
+            text_position=sv.Position.BOTTOM_CENTER
+        )
+        all_masks_frame = text_label_annotator.annotate(
+            scene=all_masks_frame,
+            detections=text_mask_detections,
+            labels=text_labels
+        )
+    
+    # Add point visualization
+    for x, y in point_coords:
+        cv2.circle(all_masks_frame, (int(x), int(y)), 5, (0, 0, 255), -1)
+    
+    # Save all masks visualization
+    output_dir = Path(output_dir)
+    all_masks_output_path = output_dir / get_filename_with_prefix(image_path, f"{prefix}_all_masks")
+    cv2.imwrite(str(all_masks_output_path), all_masks_frame)
+    print(f"Saved all masks visualization to {all_masks_output_path}")
+    
+    return all_masks_output_path
+
+
 def segment_with_points(
     image_path, 
     point_coords, 
@@ -51,6 +326,8 @@ def segment_with_points(
     boxes=None,
     box_confidences=None,
     box_labels=None,
+    increase_box_offset = 0.,
+    plot_all_masks=False
 ):
     """
     Perform point-based and/or text-based segmentation on an image using SAM2.
@@ -67,6 +344,7 @@ def segment_with_points(
         box_threshold: Confidence threshold for box detections
         text_threshold: Confidence threshold for text predictions
         use_intersection: If True, use only the intersection of point and text masks
+        plot_all_masks: If True, visualize all generated masks with their scores
         
     Returns:
         output_path: Path to the saved visualization
@@ -91,6 +369,7 @@ def segment_with_points(
     # box_confidences = None
     # box_labels = None
     text_masks = None
+    text_scores = None
     
     # Perform text-based detection if requested
     if text_prompt and grounding_model:
@@ -119,45 +398,46 @@ def segment_with_points(
     if boxes is not None and len(boxes) > 0:
         from torchvision.ops import box_convert
         boxes = boxes * torch.Tensor([w, h, w, h])
-        input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
+        boxes[:, :2] = boxes[:,:2] - increase_box_offset
+        boxes[:, 2:] = boxes[:, 2:] + increase_box_offset
+        static_boxes = boxes
+        # input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
         # Get text-based masks
         text_masks, text_scores, text_logits = sam2_predictor.predict(
             point_coords=None,
             point_labels=None,
-            box=input_boxes,
-            multimask_output=False,
+            box=static_boxes,
+            multimask_output=True,
         )
     else:
-        input_boxes = None
-
-
-        # # Adjust dimensions if needed
-        # if text_masks.ndim == 4:
-        #     text_masks = text_masks.squeeze(1)
-    
-
+        static_boxes = None
     
     # Get point-based segmentation masks
     point_masks, point_scores, point_logits = sam2_predictor.predict(
         point_coords=point_coords,
         point_labels=point_labels,
         box=None,
-        multimask_output=False,
+        multimask_output=True,
     )
-    
+    # find the best mask
+    best_ind = point_scores.argmax()
+    point_masks_best = point_masks[best_ind]
+    point_masks_best = point_masks_best[np.newaxis]
+    point_scores_best = point_scores[best_ind]
+
     # Convert masks to the right format
-    if point_masks.ndim == 4:
-        point_masks = point_masks.squeeze(1)
+    if point_masks_best.ndim == 4:
+        point_masks_best = point_masks_best.squeeze(1)
     
     # Determine which masks to use for final output
     if text_masks is not None and use_intersection:
         # Compute intersection of text and point masks
-        final_masks = np.zeros_like(point_masks)
+        final_masks = np.zeros_like(point_masks_best)
         intersection_found = False
         
-        for i in range(len(point_masks)):
+        for i in range(len(point_masks_best)):
             for j in range(len(text_masks)):
-                intersection = np.logical_and(point_masks[i], text_masks[j])
+                intersection = np.logical_and(point_masks_best[i], text_masks[j])
                 if np.any(intersection):  # Only add if intersection is not empty
                     # final_masks[i] = np.logical_or(final_masks[i], intersection)
                     final_masks[i] = np.logical_or(final_masks[i], text_masks[j])
@@ -166,16 +446,16 @@ def segment_with_points(
         # Check if any intersection was found
         if not intersection_found:
             print("No intersection found between point and text masks. Using point masks as fallback.")
-            final_masks = point_masks
+            final_masks = point_masks_best
         else:
             print(f"Found intersection between point and text masks")
         
         # Use scores from point-based segmentation
-        final_scores = point_scores
+        final_scores = point_scores[best_ind:best_ind+1]
     else:
         # Use only point-based masks
-        final_masks = point_masks
-        final_scores = point_scores
+        final_masks = point_masks_best
+        final_scores = point_scores_best
 
     # get bounding boxes
     pseudo_boxes = get_bbs(final_masks)
@@ -184,6 +464,7 @@ def segment_with_points(
         "masks": final_masks,
         "scores": final_scores,
         "boxes": pseudo_boxes,
+        "static_boxes": static_boxes,
     }
 
     # Save masks if requested
@@ -210,12 +491,13 @@ def segment_with_points(
         cv2.circle(annotated_frame, (int(x), int(y)), 5, (0, 0, 255), -1)  # Red circle for points
     
     # Add bounding box visualization if available
-    if boxes is not None and len(boxes) > 0:
-        input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
-        
+    if static_boxes is not None and len(static_boxes) > 0:
+        # input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
+        # convert input boxes to ndarray
+        static_boxes = static_boxes.numpy()
         # Create detections for boxes
         box_detections = sv.Detections(
-            xyxy=input_boxes,
+            xyxy=static_boxes,
             class_id=np.arange(len(box_labels)),
             confidence=box_confidences.numpy() if isinstance(box_confidences, torch.Tensor) else box_confidences
         )
@@ -245,6 +527,8 @@ def segment_with_points(
     )
 
     # Annotate pseudo_boxes as bounding boxes (in blue)
+    label_annotator = sv.LabelAnnotator(color=sv.Color.RED,  color_lookup=sv.ColorLookup.INDEX)
+    annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=mask_detections, labels=[f"{final_scores:.2f}"])
     pseudo_box_annotator = sv.BoxAnnotator(color=sv.Color.BLUE, color_lookup=sv.ColorLookup.INDEX)
     annotated_frame = pseudo_box_annotator.annotate(scene=annotated_frame, detections=mask_detections)
 
@@ -255,6 +539,20 @@ def segment_with_points(
     output_path = output_dir / get_filename_with_prefix(image_path, prefix)
     cv2.imwrite(str(output_path), annotated_frame)
     print(f"Saved segmentation result to {output_path}")
+    
+    # Visualize all masks with scores if requested
+    if plot_all_masks:
+        visualize_all_masks(
+            image=image,
+            image_path=image_path,
+            point_coords=point_coords,
+            point_masks=point_masks,  # Use all point masks, not just the best one
+            point_scores=point_scores,
+            text_masks=text_masks,
+            text_scores=text_scores,
+            output_dir=output_dir,
+            prefix=prefix
+        )
     
     return output_path, results_dd
 
@@ -304,6 +602,8 @@ def main():
                         help="Confidence threshold for text detection")
     parser.add_argument("--use-intersection", action="store_true",
                         help="Use intersection of point and text masks")
+    parser.add_argument("--plot-all-masks", action="store_true",
+                         help="Plot all generated masks with their scores")
     args = parser.parse_args()
 
     # fix wsl paths
@@ -363,7 +663,8 @@ def main():
         grounding_model=grounding_model,
         box_threshold=args.box_threshold,
         text_threshold=args.text_threshold,
-        use_intersection=args.use_intersection
+        use_intersection=args.use_intersection,
+        plot_all_masks=args.plot_all_masks
     )
 
 
