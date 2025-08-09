@@ -311,13 +311,53 @@ def visualize_all_masks(
     return all_masks_output_path
 
 
+def apply_static_box_mask_boundaries(masks, static_boxes):
+    """
+    Apply static box boundaries to masks by setting everything outside the boxes to 0.
+    
+    Args:
+        masks: numpy array of masks with shape (N, H, W)
+        static_boxes: numpy array or torch tensor of boxes with shape (N, 4) in format [x_min, y_min, x_max, y_max]
+        
+    Returns:
+        numpy array of masks with boundaries applied
+    """
+    if masks is None or static_boxes is None:
+        return masks
+    
+    # Convert static_boxes to numpy if it's a torch tensor
+    if isinstance(static_boxes, torch.Tensor):
+        static_boxes = static_boxes.cpu().numpy()
+    
+    # Ensure static_boxes is int type for indexing
+    static_boxes = static_boxes.astype(int)
+    
+    # Create a copy of masks to avoid modifying the original
+    bounded_masks = masks.copy()
+    
+    # Apply boundaries for each mask-box pair
+    for i, (mask, box) in enumerate(zip(bounded_masks, static_boxes)):
+        x_start, y_start, x_end, y_end = box
+        original_mask_inds = np.where(mask > 0)  # Get indices of the original mask
+        x_original_start, y_original_start = np.min(original_mask_inds[1]), np.min(original_mask_inds[0])
+        x_original_end, y_original_end = np.max(original_mask_inds[1]), np.max(original_mask_inds[0])
+        
+        # Set everything outside the static box to 0
+        mask[:y_start, :] = 0  # Set everything above the box to 0
+        mask[y_end:, :] = 0    # Set everything below the box to 0
+        mask[:, :x_start] = 0  # Set everything to the left of the box to 0
+        mask[:, x_end:] = 0    # Set everything to the right of the box to 0
+    
+    return bounded_masks
+
+
 def segment_with_points(
     image_path, 
     point_coords, 
     sam2_predictor,
     output_dir="outputs", 
     prefix="sam2", 
-    save_masks=False,
+    save_masks=True,
     text_prompt="person.",
     grounding_model=None,
     box_threshold=0.35,
@@ -327,7 +367,11 @@ def segment_with_points(
     box_confidences=None,
     box_labels=None,
     increase_box_offset = 0.,
-    plot_all_masks=False
+    plot_all_masks=False,
+    mask_color=sv.Color.YELLOW,
+    static_mask_color=sv.Color.GREEN,
+    apply_static_boundaries=False,
+    annotated_frame=None,
 ):
     """
     Perform point-based and/or text-based segmentation on an image using SAM2.
@@ -344,10 +388,17 @@ def segment_with_points(
         box_threshold: Confidence threshold for box detections
         text_threshold: Confidence threshold for text predictions
         use_intersection: If True, use only the intersection of point and text masks
+        boxes: Optional pre-computed boxes for SAM2
+        box_confidences: Confidence scores for the boxes
+        box_labels: Labels for the boxes
+        increase_box_offset: Offset to increase box size
         plot_all_masks: If True, visualize all generated masks with their scores
+        mask_color: Color for mask visualization
+        apply_static_boundaries: If True, apply static box boundaries to final masks
         
     Returns:
         output_path: Path to the saved visualization
+        results_dd: Dictionary containing masks, scores, boxes, and static_boxes
     """
     # Ensure output directory exists
     output_dir = Path(output_dir)
@@ -370,6 +421,7 @@ def segment_with_points(
     # box_labels = None
     text_masks = None
     text_scores = None
+    static_masks = None
     
     # Perform text-based detection if requested
     if text_prompt and grounding_model:
@@ -400,7 +452,12 @@ def segment_with_points(
         boxes = boxes * torch.Tensor([w, h, w, h])
         boxes[:, :2] = boxes[:,:2] - increase_box_offset
         boxes[:, 2:] = boxes[:, 2:] + increase_box_offset
-        static_boxes = boxes
+        # Clip box coordinates to image boundaries
+        static_boxes = boxes.clone()
+        static_boxes[:, 0] = np.clip(static_boxes[:, 0], 0, w - 1)
+        static_boxes[:, 1] = np.clip(static_boxes[:, 1], 0, h - 1)
+        static_boxes[:, 2] = np.clip(static_boxes[:, 2], 0, w - 1)
+        static_boxes[:, 3] = np.clip(static_boxes[:, 3], 0, h - 1)
         # input_boxes = box_convert(boxes=boxes, in_fmt="cxcywh", out_fmt="xyxy").numpy()
         # Get text-based masks
         text_masks, text_scores, text_logits = sam2_predictor.predict(
@@ -457,6 +514,10 @@ def segment_with_points(
         final_masks = point_masks_best
         final_scores = point_scores_best
 
+    # Apply static box boundaries if requested and static boxes are available
+    if static_boxes is not None:
+        static_masks = apply_static_box_mask_boundaries(final_masks, static_boxes)
+
     # get bounding boxes
     pseudo_boxes = get_bbs(final_masks)
 
@@ -465,6 +526,7 @@ def segment_with_points(
         "scores": final_scores,
         "boxes": pseudo_boxes,
         "static_boxes": static_boxes,
+        "static_masks": static_masks,
     }
 
     # Save masks if requested
@@ -484,7 +546,8 @@ def segment_with_points(
         print(f"Saved masks to {mask_file} and scores to {scores_file}")
     
     # Create a copy of the original image for visualization
-    annotated_frame = image.copy()
+    if annotated_frame is None:
+        annotated_frame = image.copy()
     
     # Add point visualization
     for x, y in point_coords:
@@ -528,17 +591,28 @@ def segment_with_points(
 
     # Annotate pseudo_boxes as bounding boxes (in blue)
     label_annotator = sv.LabelAnnotator(color=sv.Color.RED,  color_lookup=sv.ColorLookup.INDEX)
-    annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=mask_detections, labels=[f"{final_scores:.2f}"])
+    # annotated_frame = label_annotator.annotate(scene=annotated_frame, detections=mask_detections, labels=[f"{final_scores:.2f}"])
     pseudo_box_annotator = sv.BoxAnnotator(color=sv.Color.BLUE, color_lookup=sv.ColorLookup.INDEX)
     annotated_frame = pseudo_box_annotator.annotate(scene=annotated_frame, detections=mask_detections)
 
-    mask_annotator = sv.MaskAnnotator(color=sv.Color.YELLOW, color_lookup=sv.ColorLookup.INDEX, opacity=0.5)
+    mask_annotator = sv.MaskAnnotator(color=mask_color, color_lookup=sv.ColorLookup.INDEX, opacity=0.5)
     annotated_frame = mask_annotator.annotate(scene=annotated_frame, detections=mask_detections)
+
+    if static_masks is not None:
+        # Create detections for static masks
+        static_mask_detections = sv.Detections(
+            xyxy=static_boxes,
+            mask=static_masks.astype(bool),
+        )
+        # Annotate static masks
+        static_mask_annotator = sv.MaskAnnotator(color=sv.Color.GREEN, color_lookup=sv.ColorLookup.INDEX, opacity=0.5)
+        annotated_frame = static_mask_annotator.annotate(scene=annotated_frame, detections=static_mask_detections)
     
     # Save the result
     output_path = output_dir / get_filename_with_prefix(image_path, prefix)
-    cv2.imwrite(str(output_path), annotated_frame)
-    print(f"Saved segmentation result to {output_path}")
+    if 'person' not in prefix.lower():      # skip saving a duplicate image for person masks
+        cv2.imwrite(str(output_path), annotated_frame)
+        print(f"Saved segmentation result to {output_path}")
     
     # Visualize all masks with scores if requested
     if plot_all_masks:
@@ -554,7 +628,7 @@ def segment_with_points(
             prefix=prefix
         )
     
-    return output_path, results_dd
+    return output_path, results_dd, annotated_frame
 
 
 def get_bbs(final_masks):
@@ -604,6 +678,8 @@ def main():
                         help="Use intersection of point and text masks")
     parser.add_argument("--plot-all-masks", action="store_true",
                          help="Plot all generated masks with their scores")
+    parser.add_argument("--apply-static-boundaries", action="store_true",
+                        help="Apply static box boundaries to final masks")
     args = parser.parse_args()
 
     # fix wsl paths
@@ -664,9 +740,10 @@ def main():
         box_threshold=args.box_threshold,
         text_threshold=args.text_threshold,
         use_intersection=args.use_intersection,
-        plot_all_masks=args.plot_all_masks
+        plot_all_masks=args.plot_all_masks,
+        apply_static_boundaries=args.apply_static_boundaries
     )
 
 
 if __name__ == "__main__":
-    main() 
+    main()

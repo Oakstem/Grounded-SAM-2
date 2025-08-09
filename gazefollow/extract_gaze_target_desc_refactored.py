@@ -7,6 +7,7 @@ import numpy as np
 import pandas as pd
 from sympy.codegen.ast import continue_
 from tqdm import tqdm
+import supervision as sv
 from pathlib import Path
 from transformers import AutoProcessor, AutoModelForCausalLM
 from PIL import Image
@@ -58,15 +59,17 @@ local_dir = snapshot_download(
 )
 
 # Load Florence-2 model and processor
-florence_model = AutoModelForCausalLM.from_pretrained(
-    local_dir,
-    local_files_only=True,
-    trust_remote_code=True,
-    torch_dtype="auto",
-    device_map="auto",
-    low_cpu_mem_usage=True,
-).eval().to(DEVICE) # Explicitly move to device
-processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+def load_florence_model():
+    florence_model = AutoModelForCausalLM.from_pretrained(
+        local_dir,
+        local_files_only=True,
+        trust_remote_code=True,
+        torch_dtype="auto",
+        device_map="auto",
+        low_cpu_mem_usage=True,
+    ).eval().to(DEVICE) # Explicitly move to device
+    processor = AutoProcessor.from_pretrained(MODEL_ID, trust_remote_code=True)
+    return florence_model, processor
 
 # Build SAM2 model and predictor
 sam2_model = build_sam2(SAM2_CONFIG_PATH, SAM2_CHECKPOINT_PATH, device=DEVICE)
@@ -106,10 +109,44 @@ def group_by_image(df):
         'body_bbox_y': 'mean',
         'body_bbox_width': 'mean',
         'body_bbox_height': 'mean',
+        'head_bbox_x_min': 'mean',
+        'head_bbox_y_min': 'mean',
+        'head_bbox_x_max': 'mean',
+        'head_bbox_y_max': 'mean',
+        'in_or_out': 'first',  # Assuming in_or_out is the same for
     }).reset_index()
     return compact_df
 
 # --- Bounding Box Utilities ---
+def process_gaze_points(gaze_points_relative, image_width, image_height, offset=0.00):
+    """
+    Process gaze points to create absolute coordinates and relative bounding box.
+    
+    Args:
+        gaze_points_relative: numpy array of gaze points in relative coordinates [0,1]
+        image_width: width of the image in pixels
+        image_height: height of the image in pixels
+        offset: offset to expand the bounding box
+    
+    Returns:
+        tuple: (gaze_points_absolute, gaze_bbox_relative_torch)
+    """
+    gaze_points_absolute = gaze_points_relative.copy()
+    gaze_points_absolute[:, 0] = (image_width * gaze_points_absolute[:, 0]).astype(int)
+    gaze_points_absolute[:, 1] = (image_height * gaze_points_absolute[:, 1]).astype(int)
+
+    # Create a small bounding box around the gaze points
+    min_x_rel = (np.min(gaze_points_relative[:, 0]) - offset)
+    max_x_rel = (np.max(gaze_points_relative[:, 0]) + offset)
+    min_y_rel = (np.min(gaze_points_relative[:, 1]) - offset)
+    max_y_rel = (np.max(gaze_points_relative[:, 1]) + offset)
+    
+    # Bbox in relative coordinates [0,1]
+    gaze_bbox_relative = np.array([min_x_rel, min_y_rel, max_x_rel, max_y_rel]).reshape(-1, 4)
+    gaze_bbox_relative_torch = torch.from_numpy(gaze_bbox_relative)
+    
+    return gaze_points_absolute, gaze_bbox_relative_torch
+
 def get_intersection(bbox1, bbox2):
     x_left = max(bbox1[0], bbox2[0])
     y_top = max(bbox1[1], bbox2[1])
@@ -170,19 +207,51 @@ def process_image_row(row_data, original_df, config):
     h, w = img.height, img.width
 
     gaze_points_relative = original_df.loc[relevant_rows_mask, ['gaze_x', 'gaze_y']].values
-    gaze_points_absolute = gaze_points_relative.copy()
-    gaze_points_absolute[:, 0] = (w * gaze_points_absolute[:, 0]).astype(int)
-    gaze_points_absolute[:, 1] = (h * gaze_points_absolute[:, 1]).astype(int)
+    gaze_points_absolute, gaze_bbox_relative_torch = process_gaze_points(
+        gaze_points_relative, w, h, offset=0.00
+    )
+    # extract the head coordinates (gaze source)
+    head_bbox_absolute = row_data[['head_bbox_x_min', 'head_bbox_y_min', 'head_bbox_x_max', 'head_bbox_y_max']].values
+    # convert to relative coordinates
+    head_bbox_relative = [
+        head_bbox_absolute[0] / w, 
+        head_bbox_absolute[1] / h, 
+        head_bbox_absolute[2] / w, 
+        head_bbox_absolute[3] / h
+    ]
+    head_bbox_relative_torch = torch.tensor(head_bbox_relative).reshape(1, 4)
+    # set center of the head bbox as the gaze source
+    head_points = np.array([
+        (head_bbox_absolute[0] + head_bbox_absolute[2]) / 2,
+        (head_bbox_absolute[1] + head_bbox_absolute[3]) / 2
+    ]).reshape(1, 2)
 
-    # Create a small bounding box around the gaze points
-    offset = 0.00
-    min_x_rel = (np.min(gaze_points_relative[:, 0]) - offset)
-    max_x_rel = (np.max(gaze_points_relative[:, 0]) + offset)
-    min_y_rel = (np.min(gaze_points_relative[:, 1]) - offset)
-    max_y_rel = (np.max(gaze_points_relative[:, 1]) + offset)
-    # Bbox in relative coordinates [0,1]
-    gaze_bbox_relative = np.array([min_x_rel, min_y_rel, max_x_rel, max_y_rel]).reshape(-1, 4)
-    gaze_bbox_relative_torch = torch.from_numpy(gaze_bbox_relative)
+    # create a person's mask (gaze soure) using SAM2
+    segmentation_args = {
+        "image_path": str(img_path),
+        "sam2_predictor": sam2_predictor, # Passed from global scope
+        "output_dir": str(config["gaze_segmentations_dir"]),
+        "prefix": "person_",
+        "save_masks": True,
+        "plot_all_masks": False,
+        "use_intersection": False,
+        "mask_color": sv.Color.BLUE, # Use blue color for the person's mask"
+        "static_mask_color": sv.Color.ROBOFLOW, # Use purple color for the person's static mask
+        "point_coords": head_points, # SAM2 expects absolute coords
+    }
+    if config["segment_w_bb"]:
+        _, _, source_annotated_frame = segment_with_points(
+        **segmentation_args,
+        boxes=head_bbox_relative_torch, # SAM2 expects relative coords for boxes  in the range [0 1]
+        box_labels=[[1]],
+        box_confidences=np.array([1]),
+        increase_box_offset=35,
+        )
+    else:
+        _, _, source_annotated_frame = segment_with_points(
+            **segmentation_args,
+        )
+
 
     segmentation_args = {
         "image_path": str(img_path),
@@ -192,19 +261,20 @@ def process_image_row(row_data, original_df, config):
         "save_masks": True,
         "plot_all_masks": False,
         "use_intersection": False,
+        "annotated_frame": source_annotated_frame, # Use the annotated frame from the person's segmentation
     }
 
     if config["segment_w_bb"]:
-        _, person_results = segment_with_points(
+        _, person_results, annotated_frame = segment_with_points(
             **segmentation_args,
             point_coords=gaze_points_absolute, # SAM2 expects absolute coords
-            boxes=gaze_bbox_relative_torch, # SAM2 expects relative coords for boxes
+            boxes=gaze_bbox_relative_torch, # SAM2 expects relative coords for boxes in the range [0 1]
             box_labels=[[1]],
             box_confidences=np.array([1]),
             increase_box_offset=35,
         )
     else:
-        _, person_results = segment_with_points(
+        _, person_results, annotated_frame = segment_with_points(
             **segmentation_args,
             point_coords=gaze_points_absolute, # SAM2 expects absolute coords
         )
@@ -228,9 +298,14 @@ def process_image_row(row_data, original_df, config):
         if intersection_with_body / total_body_area > 0.5:
             print(f"Using static boxes for {row_data['image_path']} due to high overlap with body.")
             gaze_target_box_absolute = person_results.get('static_boxes', None)
+
+            # we need to override the saved mask file with the static boxes
             if gaze_target_box_absolute is None:
                 return row_data['image_path'], 'missing gaze target (static boxes failed)'
-            gaze_target_box_absolute = gaze_target_box_absolute.numpy() # Ensure it's a numpy array
+
+    # lets limit the segmentation to the static box range
+    # gaze_target_box_absolute = person_results.get('static_boxes', gaze_target_box_absolute)     # use static boxes if available, for all cases
+    # set_mask_to_static_box_boundaries(config, person_results, row_data)
 
     final_gaze_target_box = gaze_target_box_absolute[0]
 
@@ -276,18 +351,37 @@ def process_image_row(row_data, original_df, config):
         # doesnt seem to produce good results, skip the image if previous steps unsuccessful
         pass
 
-        # Convert absolute gaze target box to <loc_x><loc_y><loc_x_end><loc_y_end> format for Florence
-    #     gaze_target_loc_str = (
-    #         f"<loc_{int(1000 * final_gaze_target_box[0] / w)}><loc_{int(1000 * final_gaze_target_box[1] / h)}>"
-    #         f"<loc_{int(1000 * final_gaze_target_box[2] / w)}><loc_{int(1000 * final_gaze_target_box[3] / h)}>"
-    #     )
-    #     region_desc_prompt = '<REGION_TO_DESCRIPTION>'
-    #     region_desc_results = run_florence_example(region_desc_prompt, img, text_input=gaze_target_loc_str)
-    #     desc = region_desc_results.get(region_desc_prompt, '').split('<')[0].strip()
-    #     target_bbox_for_florence = final_gaze_target_box # Use the SAM2 box if dense captioning failed or wasn't used
-    #
     return row_data['image_path'], {'gaze target description': desc, 'bbox': [int(v) for v in target_bbox_for_florence],
                                     'full_img_caption': detailed_caption_text}
+
+# def set_mask_to_static_box_boundaries(config, person_results, row_data):
+#     static_box = person_results.get('static_boxes', None)
+#     if static_box is None:
+#         return
+#     if isinstance(static_box, torch.Tensor):
+#         static_box = static_box.cpu().numpy()
+#     static_box = static_box.astype(int)  # Ensure it's a numpy array
+#     x_start, y_start, x_end, y_end = static_box[0]
+#     # set everything outside the static box to 0
+#     mask = person_results.get('masks', None).copy() if 'masks' in person_results else None
+#     if mask is not None:
+#         mask[0, :y_start, :] = 0  # Set everything above the box to 0
+#         mask[0, y_end:, :] = 0  # Set everything below the box to 0
+#         mask[0, :, :x_start] = 0  # Set everything to the left of the box to 0
+#         mask[0, :, x_end:] = 0
+#         person_results['static_masks'] = mask
+#     else:
+#         person_results['static_masks'] = None  # No masks available
+
+#     image_name = Path(row_data['image_path']).stem
+#     masks_dir = config["gaze_segmentations_dir"] / "masks"
+#     masks_dir.mkdir(exist_ok=True, parents=True)
+
+#     # Save masks in numpy format
+#     mask_file = masks_dir / f"gaze__{image_name}_masks.npy"
+#     np.save(mask_file, person_results)
+
+#     return
 
 def main():
     df_gt = load_gt_data(annot_path_fixed) # Use fixed path
@@ -300,10 +394,14 @@ def main():
     processing_config = {
         "base_data_dir": base_data_dir_path_fixed,
         "gaze_segmentations_dir": gaze_segmentations_dir_fixed,
-        "dense_caption": True, # Set to False to disable dense captioning part
+        "dense_caption": False, # Set to False to disable dense captioning part
         "segment_w_bb": True,  # Set to False to segment with points only
         "save_interval": 100, # How often to save intermediate results
     }
+
+    if processing_config["dense_caption"]:
+        florence_model, processor = load_florence_model()
+        print("Florence model and processor loaded successfully.")
 
     results_dd = {}
     # nb_images = 10 # For testing: process a small number of images
@@ -311,7 +409,7 @@ def main():
     compact_df_subset = compact_df # Process all
     
     # Start processing from a specific index if needed, e.g., for resuming
-    start_index = 54
+    start_index = 0
     # compact_df_subset = compact_df.iloc[start_index:] 
 
     progress_bar = tqdm(compact_df_subset.iterrows(), total=len(compact_df_subset))
@@ -353,4 +451,4 @@ def main():
     print(f"Final results saved to {final_results_file}")
 
 if __name__ == "__main__":
-    main() 
+    main()
