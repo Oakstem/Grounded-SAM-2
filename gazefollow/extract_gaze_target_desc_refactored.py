@@ -23,8 +23,8 @@ SAM2_CONFIG_PATH = "configs/sam2.1/sam2.1_hiera_l.yaml"
 DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 
 # ANNOT_PATH = r"D:\Projects\data\gazefollow\test_annotations_release.txt"
-ANNOT_PATH = r"D:\Projects\data\gazefollow\train_annotations_release.txt"
-SPLIT_TYPE = "train" if "train" in ANNOT_PATH else "test"
+ANNOT_PATH = r"D:\Projects\data\gazefollow\test_annotations_release.txt"
+SPLIT_TYPE = "train" if "train" in ANNOT_PATH else "test2"
 BASE_DATA_DIR_PATH = r"D:\Projects\data\gazefollow"
 LLAVA_RESULTS_DIR = r"D:\Projects\LLaVA-NeXT\llava_attention_sweep\20250503_001255_You_are_an_expert_vision_assis" # Note: year seems off
 
@@ -89,6 +89,7 @@ def load_gt_data(annot_path_str: str):
         df.columns = ['image_path', 'id', 'body_bbox_x', 'body_bbox_y', 'body_bbox_width', 'body_bbox_height',
                       'eye_x', 'eye_y', 'gaze_x', 'gaze_y', 'head_bbox_x_min', 'head_bbox_y_min',
                       'head_bbox_x_max', 'head_bbox_y_max', 'meta', 'original_path']
+        df['in_or_out'] = '1'  # Default to 'in' if not present
 
     numeric_columns = ['id', 'body_bbox_x', 'body_bbox_y', 'body_bbox_width', 'body_bbox_height',
                        'eye_x', 'eye_y', 'gaze_x', 'gaze_y',
