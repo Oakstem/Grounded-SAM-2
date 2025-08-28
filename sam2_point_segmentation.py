@@ -535,15 +535,23 @@ def segment_with_points(
         masks_dir = output_dir / "masks"
         masks_dir.mkdir(exist_ok=True, parents=True)
 
-        # Save masks in numpy format
-        mask_file = masks_dir / f"{prefix}_{image_name}_masks.npy"
-        np.save(mask_file, results_dd)
-        
-        # Save scores (confidence values)
-        scores_file = masks_dir / f"{prefix}_{image_name}_scores.npy"
-        np.save(scores_file, final_scores)
-        
-        print(f"Saved masks to {mask_file} and scores to {scores_file}")
+        # Prepare dictionary for saving, ensuring all values are numpy-compatible
+        save_dict = {}
+        for key, value in results_dd.items():
+            if isinstance(value, torch.Tensor):
+                save_dict[key] = value.cpu().numpy()
+            elif value is None:
+                # Replace None with an empty numpy array to avoid pickling issues
+                save_dict[key] = np.array([])
+            elif isinstance(value, list):
+                save_dict[key] = np.array(value)
+            else:
+                save_dict[key] = value
+
+        # Save masks in numpy format. This still uses pickle.
+        mask_file = masks_dir / f"{prefix}_{image_name}_results.npy"
+        np.save(mask_file.__str__(), save_dict, allow_pickle=True)
+        print(f"Saved results dictionary to {mask_file}")
     
     # Create a copy of the original image for visualization
     if annotated_frame is None:

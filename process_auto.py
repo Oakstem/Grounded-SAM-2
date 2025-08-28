@@ -193,7 +193,7 @@ def process_points_for_image(args, image_path, person_dirs, sam2_predictor, save
                     print(f"No points found in {person_points_file[0]}")
                     continue
                 # Run segmentation for person points
-                result_path, person_results = segment_with_points(
+                result_path, person_results, annotated_frame = segment_with_points(
                     image_path=str(image_path),
                     point_coords=person_points,
                     sam2_predictor=sam2_predictor,
@@ -222,7 +222,7 @@ def process_points_for_image(args, image_path, person_dirs, sam2_predictor, save
             try:
                 gaze_points = load_points_from_file(gaze_file)
                 # Run segmentation for gaze target points
-                result_path, gaze_results = segment_with_points(
+                result_path, gaze_results, annotated_frame = segment_with_points(
                     image_path=str(image_path),
                     point_coords=gaze_points,
                     sam2_predictor=sam2_predictor,

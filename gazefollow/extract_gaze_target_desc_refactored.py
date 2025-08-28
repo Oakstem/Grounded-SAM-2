@@ -26,7 +26,7 @@ DEVICE = "cuda:0" if torch.cuda.is_available() else "cpu"
 ANNOT_PATH = r"D:\Projects\data\gazefollow\test_annotations_release.txt"
 SPLIT_TYPE = "train" if "train" in ANNOT_PATH else "test2"
 BASE_DATA_DIR_PATH = r"D:\Projects\data\gazefollow"
-LLAVA_RESULTS_DIR = r"D:\Projects\LLaVA-NeXT\llava_attention_sweep\20250503_001255_You_are_an_expert_vision_assis" # Note: year seems off
+# LLAVA_RESULTS_DIR = r"D:\Projects\LLaVA-NeXT\llava_attention_sweep\20250503_001255_You_are_an_expert_vision_assis" # Note: year seems off
 
 # --- Helper Functions ---
 def fix_wsl_paths(path: str) -> str:
@@ -48,7 +48,7 @@ print(f"Python Path: {sys.path}")
 # Apply WSL path fix to relevant paths
 annot_path_fixed = fix_wsl_paths(ANNOT_PATH)
 base_data_dir_path_fixed = Path(fix_wsl_paths(BASE_DATA_DIR_PATH))
-llava_results_dir_fixed = Path(fix_wsl_paths(LLAVA_RESULTS_DIR))
+# llava_results_dir_fixed = Path(fix_wsl_paths(LLAVA_RESULTS_DIR))
 gaze_segmentations_dir_fixed = Path(annot_path_fixed).parent / f"{SPLIT_TYPE}_gaze_segmentations"
 gaze_segmentations_dir_fixed.mkdir(parents=True, exist_ok=True)
 
